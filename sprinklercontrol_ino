@@ -1,0 +1,208 @@
+/*
+ * Project SprinklerControl
+ * Description: Home Sprinkler System with weather modification
+ * Author: Martin Smaha
+ * Date: 8/21/18
+ */
+#include "SprinklerControl.h"
+
+//STARTUP(WiFi.selectAntenna(ANT_EXTERNAL));//uncomment if using external antenna
+
+TParameters Parameters;
+bool sprinklers[8],manual[8],restart;
+int lastMinute,DOW,Minute,Hour,Second,StateA,StateB,MinutesA,MinutesB,ZoneA,ZoneB,SystemState,WiFiRSSI,ManualMinutes;
+
+// reset the system after 60 seconds if the application is unresponsive
+ApplicationWatchdog wd(60000, System.reset);
+
+// setup() runs once, when the device is first turned on.
+void setup() {
+  memset(&sprinklers[0],0,sizeof(sprinklers));
+  memset(&manual[0],0,sizeof(manual));
+  StateA = 0;
+  StateB = 0;
+  SystemState = -1;
+  EEPROM.get(0, Parameters);
+  if (Parameters.Magic != 0xA5A5) {
+    Parameters.Magic = 0xA5A5;
+    Parameters.isOperational = false;
+    for (int i = 0; i < 6; i++) {
+      Parameters.A_minutes[i] = 0;
+      Parameters.B_minutes[i] = 0;
+    }
+    for (int i = 0; i < 7; i++) {
+      strcpy(Parameters.A_hhmm[i],"off");
+      strcpy(Parameters.B_hhmm[i],"off");
+    }
+    Parameters.isRain = true;//disable during Rain
+    Parameters.isWind = true;//disable during wind
+    Parameters.wind_mph = 10;
+    Parameters.A_temp = 70;
+    Parameters.B_temp = 80;
+    EEPROM.put(0, Parameters);
+  }
+  // setup digital IO for zone control
+  pinMode(D0, OUTPUT);
+  pinMode(D1, OUTPUT);
+  pinMode(D2, OUTPUT);
+  pinMode(D3, OUTPUT);
+  pinMode(D4, OUTPUT);
+  pinMode(D5, OUTPUT);
+  digitalWrite(D0, HIGH); //high is off
+  digitalWrite(D1, HIGH);
+  digitalWrite(D2, HIGH);
+  digitalWrite(D3, HIGH);
+  digitalWrite(D4, HIGH);
+  digitalWrite(D5, HIGH);
+  // start listening for clients
+  WebInit();
+  WeatherInit();
+  lastMinute = Time.minute();
+  Particle.variable("WiFiRSSI", WiFiRSSI);
+  Time.zone(-8);//local time PST
+  restart = true;
+  ManualMinutes = 0;
+}
+
+// loop() runs over and over again, as quickly as it can execute.
+void loop() {
+  WiFiRSSI = WiFi.RSSI();
+  Hour = Time.hour();
+  Minute = Time.minute();
+  Second = Time.second();
+  DOW = Time.weekday() - 1;//we use 0-6 for their 1-7
+  restart = false;
+  if (Minute != lastMinute) {
+    restart = true;
+    WeatherMinute();
+    MinutesA++;
+    MinutesB++;
+    if (Hour == 6 && Minute == 0) {//at 0600 each day
+      high_temp = 0;//reset daily peak temperature
+      temp_f = 0;//reset daily peak temperature
+      isRain = false;//reset rain flag
+      if (WiFi.ready() && Particle.connected()) Particle.syncTime();//and resync with time service
+    }
+    if (manual[0] || manual[1] || manual[2] || manual[3] || manual[4] || manual[5]){
+      ManualMinutes++;
+      if (ManualMinutes >= 5) {
+        memset(manual,0,sizeof(manual));
+      }
+    } else {
+      ManualMinutes = 0;
+    }
+  }
+  lastMinute = Minute;
+  WebTask(restart);
+  ScheduleTask();
+  UpdateZones();
+  WeatherTask();
+}
+
+void SprinklersOff(void) {
+  memset(sprinklers,0,sizeof(sprinklers));
+}
+
+void UpdateZones(void) {
+  digitalWrite(D0, (sprinklers[0] || manual[0])?LOW:HIGH); //high is off
+  digitalWrite(D1, (sprinklers[1] || manual[1])?LOW:HIGH);
+  digitalWrite(D2, (sprinklers[2] || manual[2])?LOW:HIGH);
+  digitalWrite(D3, (sprinklers[3] || manual[3])?LOW:HIGH);
+  digitalWrite(D4, (sprinklers[4] || manual[4])?LOW:HIGH);
+  digitalWrite(D5, (sprinklers[5] || manual[5])?LOW:HIGH);
+}
+
+void ScheduleTask(void) {
+  if (Parameters.isOperational) {
+    SystemState = 1;
+    if (Parameters.isWind && wind_mph >= Parameters.wind_mph) {
+      SystemState = 2;
+      SprinklersOff();
+      StateA = 0;
+      StateB = 0;
+    } else if (Parameters.isRain && isRain) {
+      SystemState = 3;
+      SprinklersOff();
+      StateA = 0;
+      StateB = 0;
+    } else {
+      ProgramTaskA();
+      ProgramTaskB();
+    }
+  } else {
+    SystemState = 0;
+  }
+}
+
+void ProgramTaskA(void) {//entered once each minute when seconds are 0
+  switch (StateA) {
+    case 0: //look for start
+      if (high_temp >= Parameters.A_temp && isDigit(Parameters.A_hhmm[DOW][0])) {
+        int t = atoi(Parameters.A_hhmm[DOW]);//get 4 digit time
+        int hr = t/100;
+        int mn = t%100;
+        if (Hour == hr && Minute == mn){
+          MinutesA = 0;
+          ZoneA = -1;
+          StateA = 1;
+          StartZoneA();
+        }
+      }
+      break;
+    case 1: //run for Duration
+      if (MinutesA >= Parameters.A_minutes[ZoneA]) {
+        MinutesA = 0;
+        SprinklersOff();
+        StartZoneA();//next zone
+      }
+      break;
+  }
+}
+
+void StartZoneA(void) {
+  for (ZoneA++; ZoneA < 6; ZoneA++) {
+    if (Parameters.A_minutes[ZoneA] > 0) {
+      sprinklers[ZoneA] = true;
+      break;
+    }
+  }
+  if (ZoneA >= 6) {
+    StateA = 0;//all done
+  }
+}
+void ProgramTaskB(void) {//entered once each minute when seconds are 0
+  switch (StateB) {
+    case 0: //look for start
+      if (high_temp >= Parameters.B_temp && isDigit(Parameters.B_hhmm[DOW][0])) {
+        int t = atoi(Parameters.B_hhmm[DOW]);//get 4 digit time
+        int hr = t/100;
+        int mn = t%100;
+        if (Hour == hr && Minute == mn){
+          MinutesB = 0;
+          ZoneB = -1;
+          StateB = 1;
+          StartZoneB();
+        }
+      }
+      break;
+    case 1: //run for Duration
+      if (MinutesB >= Parameters.B_minutes[ZoneB]) {
+        MinutesB = 0;
+        SprinklersOff();
+        StartZoneB();//next zone
+      }
+      break;
+  }
+}
+
+void StartZoneB(void) {
+  for (ZoneB++; ZoneB < 6; ZoneB++) {
+    if (Parameters.B_minutes[ZoneB] > 0) {
+      sprinklers[ZoneB] = true;
+      break;
+    }
+  }
+  if (ZoneB >= 6) {
+    StateB = 0;//all done
+  }
+}

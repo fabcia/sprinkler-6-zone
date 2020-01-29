@@ -1,0 +1,190 @@
+/*
+ * Project SprinklerControl
+ * Description: Home Sprinkler System with weather modification
+ * Author: Martin Smaha
+ * Date: 8/21/18
+ * File: Weather Client
+ */
+#include "SprinklerControl.h"
+#include "application.h"
+
+static TCPClient WeatherClient;
+char WeatherBuf[4096],icon_url[128],weather_string[64],observation_time[64];
+float temp_f,wind_mph,precip_today_in,high_temp;
+int WeatherState,WeatherTimer,WeatherBufCount,TZOffset;
+bool isRain;
+
+void WeatherTask(void);
+void ParseWeather(void);
+void ParseFloat(const char* key, float* value);
+void ParseInt(const char* key, int* value);
+void ParseString(const char* key, char* value);
+
+int WReset(String extra) {
+  WeatherState = 3;
+  return 0;
+}
+
+void WeatherInit(void) {
+  WeatherState = 3;
+  WeatherTimer = 0;
+  isRain = false;
+
+  Particle.variable("Weather", WeatherState);
+  Particle.variable("iconurl",icon_url);
+  Particle.function("WReset", WReset);
+
+}
+
+void WeatherMinute(void) {
+  WeatherTimer++;
+}
+
+// Parse Weather into the values we need
+void ParseWeather(void) {
+  char buf[32];
+  ParseFloat("temp",&temp_f);
+  ParseFloat("speed",&wind_mph);
+  precip_today_in = 0.0;
+  memset(weather_string,0,sizeof(weather_string));
+  // ParseString("main",weather_string);
+	ParseString("current",weather_string);
+  memset(icon_url,0,sizeof(icon_url));
+  memset(buf,0,sizeof(buf));
+  // ParseString("icon",buf); icon have different syntiax in openweatherstack
+  // sprintf(icon_url,"http://openweathermap.org/img/w/%s.png",buf); icon have different syntiax in openweatherstack
+  /* these parameters are not available at openweathermap
+  memset(observation_time,0,sizeof(observation_time));
+  ParseString("observation_time",observation_time); avabiable in openweatherstack
+  strcpy(observation_time,observation_time+5);//remove the word "Last"
+  ParseString("local_tz_offset",buf);
+  TZOffset = atoi(buf)/100;
+  if (TZOffset == -8) {
+    Time.endDST();
+  }
+  if (TZOffset == -7) {
+    Time.beginDST();
+  }
+*/
+  if (temp_f > high_temp) {
+    high_temp = temp_f;
+  }
+  // if ((strcmp(weather_string,"Rain") == 0) || precip_today_in > 0.02) {
+	if ((strcmp(weather_string,"rain") == 0) || precip_today_in > 0.02) {
+    isRain = true;
+  }
+}
+
+// ParseFloat is a simple single level finder
+void ParseFloat(const char* key, float* value) {
+  char* p = strstr(WeatherBuf,key);
+  if (p) {
+    p = strstr(p,":");
+    if (p) {
+      // *value = atof(p+1);			modify for api openweatherstack: no space after descriptor in json responce
+			*value = atof(p);
+    }
+  }
+}
+// ParseInt is a simple single level finder
+void ParseInt(const char* key, int* value) {
+  char* p = strstr(WeatherBuf,key);
+  if (p) {
+    p = strstr(p,":");
+    if (p) {
+      // *value = atoi(p+1); modify for api openweatherstack: no space after descriptor in json responce
+			*value = atoi(p);
+    }
+  }
+}
+// ParseString is a simple single level finder
+void ParseString(const char* key, char* value) {
+  char keyword[32];
+  memset(keyword,0,32);
+  sprintf(keyword,"\"%s\"",key);
+  char* p = strstr(WeatherBuf,keyword);
+  if (p) {
+    p = strstr(p,":");
+    if (p) {
+      p = strstr(p+1,"\"");
+      if (p) {
+        p++;
+        char *p2 = strstr(p,"\"");
+        if (p2) {
+          strncpy(value,p,p2-p);
+        }
+      }
+    }
+  }
+}
+
+// Get current weather conditions every 10 minutes
+void WeatherTask(void) {
+  if (!WiFi.ready()){
+    WeatherTimer = 0;
+    WeatherState = 3;
+    return;// go to 3 when WiFi returns
+  } else {
+  switch (WeatherState) {
+    case 0: // connect to server
+      
+			if (WeatherClient.connect("api.weatherstack.com", 80)) {
+        WeatherClient.println("GET /current?access_key=2904787d2433f30012fd6328b37e8443&query=Ladispoli,Italy"); //by station example
+        WeatherClient.println("Host: api.weatherstack.com");
+        WeatherClient.println("Content-Length: 0");
+        WeatherClient.println();
+        WeatherBuf[0] = 0;
+        WeatherBufCount = 0;
+        WeatherState = 1;
+      }
+			/*
+			if (WeatherClient.connect("api.openweathermap.org", 80)) {
+        WeatherClient.println("GET /data/2.5/weather?id=5338783&units=imperial&APPID=your_key_here"); //by station example
+        WeatherClient.println("Host: api.openweathermap.org");
+        WeatherClient.println("Content-Length: 0");
+        WeatherClient.println();
+        WeatherBuf[0] = 0;
+        WeatherBufCount = 0;
+        WeatherState = 1;
+      }
+			*/
+      break;
+    case 1: // get returned data
+      if (WeatherClient.connected()) {
+        if (WeatherClient.available()) { //get each data segment
+          char buf[128];
+          int n = WeatherClient.read((uint8_t*)buf,sizeof(buf)-1);
+          if ((WeatherBufCount + n) <= sizeof(WeatherBuf)) { //prevent array overflow
+            buf[n] = 0;
+            strcat(WeatherBuf,buf);
+            WeatherBufCount += n;
+          } else {
+            WeatherClient.stop();//force closed
+            WeatherState = 3;
+          }
+        }
+        if (WeatherTimer >= 2) {//timeout if response is taking too long
+          WeatherClient.stop();//force closed
+          WeatherState = 3;
+        }
+      } else {
+        WeatherState = 2;
+      }
+      break;
+    case 2: // parse data
+      if (strstr(WeatherBuf,"404 Not Found")) {
+        WeatherTimer = 8;//try again sooner
+      } else {
+        ParseWeather();
+      }
+      WeatherState = 3;
+      break;
+    case 3: // wait 15 minutes and update
+      if (WeatherTimer >= 15) {
+        WeatherTimer = 0;
+        WeatherState = 0;
+      }
+      break;
+  }
+  }
+}

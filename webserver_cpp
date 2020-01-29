@@ -1,0 +1,417 @@
+/*
+ * Project SprinklerControl
+ * Description: Home Sprinkler System with weather modification
+ * Author: Martin Smaha
+ * Date: 8/21/18
+ * File: Web Server
+ */
+#include "SprinklerControl.h"
+#include "application.h"
+
+static TCPServer server = TCPServer(8080);//web page port
+static TCPClient WebClient;
+static char LANBuf[4096];
+static int WebState,ContentLength,ContentStart,LANBufCount,next_hhmm,current_hhmm;
+static const char *dowString[] = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
+
+void ParseWeb(void);
+void WebServer(void);
+void WebTask(void);
+void ParseForm(void);
+void ParseManual(void);
+
+int MyReset(String extra) {
+  System.reset();
+  return 0;
+}
+int WebReset(String extra) {
+  WebState = 3;
+  return 0;
+}
+
+void WebInit(void) {
+  WebState = 0;
+  LANBufCount = 0;
+  ContentLength = 0;
+  ContentStart = 0;
+  server.begin();
+  Particle.variable("Web", WebState);
+  Particle.function("MyReset", MyReset);
+  Particle.function("WebReset", WebReset);
+
+}
+
+// Web Header
+void WebHeader(void) {
+  WebClient.print("HTTP/1.1 200 OK\r\n");
+  WebClient.print("Cache-Control: max-age=0, no-cache\r\n");
+  WebClient.print("Pragma: no-cache\r\n");
+  WebClient.print("Connection: close\r\n\r\n");
+  WebClient.print("<html><head><title>Sprinkler System</title><style>div {border: 2px solid #a1a1a1;padding: 10px 20px;width: 300px;border-radius: 25px;}button {width: 100px;height: 40px;background: blue;color: white;}button:hover {color: black;}</style>");
+  WebClient.print("<meta http-equiv=\"Cache-Control\" content=\"no-cache, no-store, must-revalidate\" />");
+  WebClient.print("<meta http-equiv=\"Pragma\" content=\"no-cache\" />");
+  WebClient.print("<meta http-equiv=\"Expires\" content=\"0\" />");
+  WebClient.print("<meta content='text/html; charset=ISO-8859-1' http-equiv='Content-Type'>");
+  WebClient.print("<meta name='viewport' content='width=device-width, initial-scale=1'></head>");
+  WebClient.print("<body><div>");
+}
+
+void WebFooter(void) {
+  WebClient.print("</div></body></html>");
+}
+
+// Web server
+void ParseWeb(void) {
+  if (WebClient.connected()) {
+    char buf[256];
+    int isRequest = 0;
+    if (strstr(LANBuf,"GET /status.html") != NULL) {
+        isRequest = 1;
+    } else if (strstr(LANBuf,"GET /manual.html") != NULL) {
+        isRequest = 2;
+    } else if (strstr(LANBuf,"GET /schedule.html") != NULL) {
+        isRequest = 3;
+    } else if (strstr(LANBuf,"POST /schedule.cgi") != NULL) {
+        ParseForm();
+        isRequest = 3;
+    } else if (strstr(LANBuf,"GET /manual.cgi") != NULL) {
+        ParseManual();
+        isRequest = 2;
+    } else if (strstr(LANBuf,"GET /weather.html") != NULL) {
+        isRequest = 4;
+    }
+    //send response
+    if (isRequest == 0) { //standard http error message for page not found
+      WebClient.print("HTTP/1.1 404 \r\n\r\n");
+      WebClient.stop();
+    } else if (isRequest == 1) { //status.html
+      WebHeader();
+      //Header
+      WebClient.print("<H1>Sprinkler System</H1>");
+      //Current Weather
+      sprintf(buf,"<table><tr><td><a href=weather.html><b>Current Weather</b></a></td><td><img src=\"%s\"</td></tr>",icon_url);
+      WebClient.print(buf);
+      sprintf(buf,"<tr><td>Weather:</td><td>%s</td></tr>",weather_string);
+      WebClient.print(buf);
+      sprintf(buf,"<tr><td>Temperature:</td><td>%.1f F</td></tr><tr><td>Wind Speed:</td><td>%.1f mph</td></tr>",temp_f,wind_mph);//todays rain removed 8/21/18
+      WebClient.print(buf);
+      sprintf(buf,"<tr><td>Today's High:</td><td>%.1f F</td></tr></table>",high_temp);
+      WebClient.print(buf);
+      sprintf(buf,"<font>%s</font><br>",observation_time);
+      WebClient.print(buf);
+      sprintf(buf,"<font>Time is: %s %02d:%02d:%02d</font>",dowString[DOW],Hour,Minute,Second);
+      WebClient.print(buf);
+      //current running program
+      if (StateA > 0) {
+        sprintf(buf,"<hr><font>Program A is Running: Zone %d</font>",ZoneA+1);
+        WebClient.print(buf);
+      } else if (StateB > 0) {
+        sprintf(buf,"<hr><font>Program B is Running: Zone %d</font>",ZoneB+1);
+        WebClient.print(buf);
+      } else {
+        switch (SystemState) {
+          case -1:
+            WebClient.print("<hr>System is Initializing");
+            break;
+          case 0:
+            WebClient.print("<hr>System is DISABLED");
+            break;
+          case 1:
+            WebClient.print("<hr>System is Operational");
+            if (isDigit(Parameters.A_hhmm[DOW][0])) {
+              next_hhmm = atoi(Parameters.A_hhmm[DOW]);
+              current_hhmm = Minute + (Hour * 100);
+              if (next_hhmm > current_hhmm) {
+                if (high_temp >= Parameters.A_temp) {
+                  sprintf(buf,"<br>A Prog starts at: %s",Parameters.A_hhmm[DOW]);
+                  WebClient.print(buf);
+                } else {
+                  WebClient.print("<br>A Prog DISABLED due to temperature");
+                }
+              }
+            }
+            if (isDigit(Parameters.B_hhmm[DOW][0])) {
+              next_hhmm = atoi(Parameters.B_hhmm[DOW]);
+              current_hhmm = Minute + (Hour * 100);
+              if (next_hhmm > current_hhmm) {
+                if (high_temp >= Parameters.B_temp) {
+                  sprintf(buf,"<br>B Prog starts at: %s",Parameters.B_hhmm[DOW]);
+                  WebClient.print(buf);
+                } else {
+                  WebClient.print("<br>B Prog DISABLED due to temperature");
+                }
+              }
+            }
+            break;
+          case 2:
+            WebClient.print("<hr>System is Wind DISABLED");
+            break;
+          case 3:
+            WebClient.print("<hr>System is Rain DISABLED");
+            break;
+        }
+      }
+      //menu area
+      WebClient.print("<hr>");
+      WebClient.print("<table><tr><td><button onclick=location.href='manual.html'>MANUAL</button><td>");
+      WebClient.print("<td><button  onclick=location.href='schedule.html'>SCHEDULE</button></td></tr></table>");
+      //Footer
+      WebFooter();
+      WebClient.stop();
+    } else if (isRequest == 2) { //manual.html
+      WebHeader();
+      WebClient.print("<H1>Manual Control</H1><table>");
+      for (int i = 0; i < 6; i++) {
+        if (manual[i]) {
+          sprintf(buf,"<tr><td><button  onclick=location.href='manual.cgi?zone=%d'>ZONE %d</button></td><td><span style=background:#00ff00;> &nbsp &nbsp </span><font>&nbsp ON</font></td></tr>",i+1,i+1);
+        } else {
+          sprintf(buf,"<tr><td><button  onclick=location.href='manual.cgi?zone=%d'>ZONE %d</button></td><td><span style=background:#cccccc;> &nbsp &nbsp </span><font>&nbsp OFF</font></td></tr>",i+1,i+1);
+        }
+        WebClient.print(buf);
+      }
+      WebClient.print("</table>");
+      //menu area
+      WebClient.print("<hr>");
+      WebClient.print("<table><tr><td><button onclick=location.href='status.html'>STATUS</button><td>");
+      WebClient.print("<td><button  onclick=location.href='schedule.html'>SCHEDULE</button></td></tr></table>");
+      WebFooter();
+      WebClient.stop();
+    } else if (isRequest == 3){ //schedule.html
+      WebHeader();
+      WebClient.print("<H1>Schedule</H1><form action=schedule.cgi method=post>");
+      //enable operation
+      if (Parameters.isOperational) {
+        WebClient.print("<input type=checkbox name=isOperational value=1 checked>Enable Operation<br>");
+      } else {
+        WebClient.print("<input type=checkbox name=isOperational value=1 >Enable Operation<br>");
+      }
+      //zone times
+      WebClient.print("<hr><table><tr><td><b>Zone</b></td><td><b>Prog A</b></td><td><b>Prog B</b></td></tr>");
+      for (int i = 0; i < 6; i++) {
+        sprintf(buf,"<tr><td>%d</td><td><input type=text size=3 value=%d name=A_minutes%d></td><td><input type=text size=3 value=%d name=B_minutes%d></td></tr>",i+1,Parameters.A_minutes[i],i+1,Parameters.B_minutes[i],i+1);
+        WebClient.print(buf);
+      }
+      WebClient.print("</table>Enter zone duration in minutes<hr>");
+      //start times
+      WebClient.print("<table><tr><td><b>Day</b></td><td><b>Start A</b></td><td><b>Start B</b></td></tr>");
+      for (int i = 0; i < 7; i++) {
+        char startA[8],startB[8];
+        if (isdigit(Parameters.A_hhmm[i][0]) || Parameters.A_hhmm[i][0] == 'o') {
+          strcpy(startA,Parameters.A_hhmm[i]);
+        } else {
+          strcpy(startA,"off");
+        }
+        if (isdigit(Parameters.B_hhmm[i][0]) || Parameters.B_hhmm[i][0] == 'o') {
+          strcpy(startB,Parameters.B_hhmm[i]);
+        } else {
+          strcpy(startB,"off");
+        }
+        sprintf(buf,"<tr><td>%s</td><td><input type=text size=5 value=%s name=A_hhmm%d></td><td><input type=text size=5 value=%s name=B_hhmm%d></td></tr>",dowString[i],startA,i+1,startB,i+1);
+        WebClient.print(buf);
+      }
+      WebClient.print("</table>Enter time as 24hr HHMM or off<hr>");
+      //weather options
+      WebClient.print("<b>Weather Options</b><br>");
+      if (Parameters.isRain) {
+        WebClient.print("<input type=checkbox name=isRain value=1 checked>Disable start if it has rained<br>");
+      } else {
+        WebClient.print("<input type=checkbox name=isRain value=1 >Disable start if it has rained<br>");
+      }
+      if (Parameters.isWind) {
+        WebClient.print("<input type=checkbox name=isWind value=1 checked>Disable start if it is windy<br>");
+      } else {
+        WebClient.print("<input type=checkbox name=isWind value=1 >Disable start if it is windy<br>");
+      }
+      sprintf(buf,"<input type=text size=3 value=%d name=wind_mph>Wind MPH to disable at<br>",Parameters.wind_mph);
+      WebClient.print(buf);
+      sprintf(buf,"<input type=text size=3 value=%d name=A_temp>Temperature to enable A program<br>",Parameters.A_temp);
+      WebClient.print(buf);
+      sprintf(buf,"<input type=text size=3 value=%d name=B_temp>Temperature to enable B program<br>",Parameters.B_temp);
+      WebClient.print(buf);
+      //submit button
+      WebClient.print("<hr><input type=submit value='Submit Changes'></form>");
+      //menu area
+      WebClient.print("<hr>");
+      WebClient.print("<table><tr><td><button onclick=location.href='status.html'>STATUS</button><td>");
+      WebClient.print("<td><button  onclick=location.href='manual.html'>MANUAL</button></td></tr></table>");
+      WebFooter();
+      WebClient.stop();
+    } else if (isRequest == 4) {//weather.html
+      WebHeader();
+      WebClient.print("<H1>Weather Response</H1>Data response from openweathermap</div>");
+      WebClient.print("<pre>");
+      WebClient.print(WeatherBuf);
+      WebClient.print("</pre><button onclick=location.href='status.html'>STATUS</button></body></html>");
+      WebClient.stop();
+    }
+  }
+}
+
+// Get web server requests
+void WebTask(bool restart) {
+  if (!WiFi.ready()){
+    WebState = 3;
+    return;//leave now but go to 3 when WiFi returns
+  }
+  switch (WebState) {
+    case 0: // connect to server
+      if (!WebClient.connected()) {//look for connection
+        if (restart){
+          WebState = 3;
+        } else {
+          WebClient = server.available();
+        }
+      } else {//we are connected
+        memset(LANBuf,0,sizeof(LANBuf));
+        LANBufCount = 0;
+        ContentLength = 0;
+        ContentStart = 0;
+        WebState = 1;
+      }
+      break;
+    case 1: // get returned data
+      if (WebClient.connected()) {
+        if (WebClient.available()) { //get each data segment
+          char buf[256];
+          int n = WebClient.read((uint8_t*)buf,sizeof(buf));
+          if ((LANBufCount + n) <= sizeof(LANBuf)) { //prevent array overflow
+            memcpy(LANBuf+LANBufCount,buf,n);
+            LANBufCount += n;
+          }
+          if (ContentLength == 0) {
+            char *p = strstr(LANBuf,"Content-Length:");
+            if (p) {
+              ContentLength = atoi(p+15);
+            }
+          }
+          if (ContentStart == 0) {
+            char *p = strstr(LANBuf,"\r\n\r\n");
+            if (p) {
+              ContentStart = p + 4 - LANBuf;
+            }
+          }
+        } else if (LANBufCount >= (ContentLength + ContentStart) && LANBufCount > 0) {
+          WebState = 2;
+        }
+      } else {
+        WebState = 3;
+      }
+      break;
+    case 2: // parse data
+      ParseWeb();
+      WebState = 0;
+      LANBufCount = 0;
+      ContentStart = 0;
+      ContentLength = 0;
+      break;
+    case 3: // restart server
+      server.stop();
+      WebState = 4;
+      break;
+    case 4: // restart server
+      delay(1000);
+      server.begin();
+      WebState = 0;
+      break;
+  }
+}
+
+// Get web form response
+void ParseForm(void) {
+  char buf[32], *p;
+  p = strstr(LANBuf,"isOperational=");
+  if (p) {
+    Parameters.isOperational = true;
+  } else {
+    Parameters.isOperational = false;
+  }
+  for (int i = 0; i < 6; i++) {
+    sprintf(buf,"A_minutes%d=",i+1);
+    p = strstr(LANBuf,buf);
+    if (p) {
+      p += strlen(buf);
+      Parameters.A_minutes[i] = atoi(p);
+    }
+  }
+  for (int i = 0; i < 6; i++) {
+    sprintf(buf,"B_minutes%d=",i+1);
+    p = strstr(LANBuf,buf);
+    if (p) {
+      p += strlen(buf);
+      Parameters.B_minutes[i] = atoi(p);
+    }
+  }
+  for (int i = 0; i < 7; i++) {
+    sprintf(buf,"A_hhmm%d=",i+1);
+    p = strstr(LANBuf,buf);
+    if (p) {
+      p += strlen(buf);
+      char *end = strchr(p,'&');
+      int n = 4;
+      if (end) {
+        n = min(end - p,4);
+      }
+      memset(Parameters.A_hhmm[i],0,6);
+      strncpy(Parameters.A_hhmm[i],p,n);
+    }
+  }
+  for (int i = 0; i < 7; i++) {
+    sprintf(buf,"B_hhmm%d=",i+1);
+    p = strstr(LANBuf,buf);
+    if (p) {
+      p += strlen(buf);
+      char *end = strchr(p,'&');
+      int n = 4;
+      if (end) {
+        n = min(end - p,4);
+      }
+      memset(Parameters.B_hhmm[i],0,6);
+      strncpy(Parameters.B_hhmm[i],p,n);
+    }
+  }
+  p = strstr(LANBuf,"isRain=");
+  if (p) {
+    Parameters.isRain = true;
+  } else {
+    Parameters.isRain = false;
+  }
+  p = strstr(LANBuf,"isWind=");
+  if (p) {
+    Parameters.isWind = true;
+  } else {
+    Parameters.isWind = false;
+  }
+  p = strstr(LANBuf,"wind_mph=");
+  if (p) {
+    p += 9;
+    Parameters.wind_mph = atoi(p);
+  }
+  p = strstr(LANBuf,"A_temp=");
+  if (p) {
+    p += 7;
+    Parameters.A_temp = atoi(p);
+  }
+  p = strstr(LANBuf,"B_temp=");
+  if (p) {
+    p += 7;
+    Parameters.B_temp = atoi(p);
+  }
+  EEPROM.put(0, Parameters);
+}
+
+//look for zone control command
+void ParseManual(void) {
+  char *p = strstr(LANBuf,"?zone=");
+  if (p) {
+    int x = atoi(p+6) - 1;
+    if (x >= 0 && x <= 5) {
+      for (int i = 0; i <= 5; i++) {//check all 6 zones
+        if (i == x) {
+          manual[i] = !manual[i];
+        } else {
+          manual[i] = false;
+        }
+      }
+    }
+  }
+}
