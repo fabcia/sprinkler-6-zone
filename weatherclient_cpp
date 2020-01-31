@@ -129,7 +129,7 @@ void WeatherTask(void) {
     case 0: // connect to server
       
 			if (WeatherClient.connect("api.weatherstack.com", 80)) {
-        WeatherClient.println("GET /current?access_key=2904787d2433f30012fd6328b37e8443&query=Ladispoli,Italy"); //by station example
+        WeatherClient.println("GET /current?access_key=your_id_key&query=Ladispoli,Italy"); //by station example
         WeatherClient.println("Host: api.weatherstack.com");
         WeatherClient.println("Content-Length: 0");
         WeatherClient.println();
